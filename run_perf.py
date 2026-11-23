@@ -325,6 +325,10 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
             
             handle.write(f"Decode Generations per Second: start={start_gen_rate:.2f}, mid(token {mid_step})={mid_gen_rate:.2f}, end={end_gen_rate:.2f}\n")
             handle.write(f"Aggregate Decode Throughput Tok/s (batch={batch_size}, replica_count={replica_count}): start={start_gen_rate * batch_size * replica_count:.2f}, mid(token {mid_step})={mid_gen_rate * batch_size * replica_count:.2f}, end={end_gen_rate * batch_size * replica_count:.2f}\n")
+        
+        handle.write(f"Total Model Calls: {inference_timing['total_model_calls']}\n")
+        handle.write(f"Decode Model Calls: {inference_timing['decode_model_calls']}\n")
+        handle.write(f"Peak Memory per GPU (GB): {inference_timing['peak_memory_gb']:.2f}\n")
         handle.write("\n")
         handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh\n")
         handle.write("\n".join(topology_lines))

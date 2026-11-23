@@ -883,6 +883,13 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 mode="inference",
                 filename="memory_graph_prefill",
             )
+        project_param = getattr(self, "project_param", {}) or {}
+        block_size = int(project_param.get("block_size", 1))
+        refinement_rounds = int(project_param.get("refinement_rounds", 1))
+        if block_size < 1:
+            raise ValueError(f"project_param.block_size must be >= 1, got {block_size}")
+        if refinement_rounds < 1:
+            raise ValueError(f"project_param.refinement_rounds must be >= 1, got {refinement_rounds}")
 
         decode_peak_gb = prefill_peak_gb
         if decode_len > 0:
@@ -896,7 +903,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 intermediate_size=self.moe_intermediate_size if self.use_moe else intermediate_size,
                 vocab_size=vocab_size,
                 model_type=self.model_type,
-                query_tokens=1,  # H2: tokens per decode call for the decode memory peak
+                query_tokens=block_size,  # H2: tokens per decode call for the decode memory peak
             )
             (
                 decode_pipeline_graph,
@@ -914,7 +921,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 batch_size=batch_size,
                 total_seq_len=self.seq_len,
                 gemm_shapes=decode_gemm_shapes,
-                query_tokens=1,
+                query_tokens=block_size,
             )
             decode_dispatcher = LLMExecutionDispatcher(
                 time_calc=self,
@@ -932,7 +939,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             decode_memory_data = mem_estimator.build_memory_data(
                 mode="inference",
                 batch_size=batch_size,
-                seq_len=1,
+                seq_len=block_size,
                 gemm_shapes=decode_gemm_shapes,
                 kv_cache_tokens=self.seq_len,
             )
@@ -1061,15 +1068,19 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         Returns:
             dict: Breakdown of inference timing components
         """
+        project_param = getattr(self, "project_param", {}) or {}
+        block_size = int(project_param.get("block_size", 1))
+        refinement_rounds = int(project_param.get("refinement_rounds", 1))
+
         # Calculate prefill time (existing functionality)
         prefill_time, prefill_energy = self.calc_time()
         # Calculate decode time (new functionality)
         decode_time, decode_energy, decode_samples = self.calc_decode_time()
         total_time = prefill_time + decode_time
 
-        time_to_first_token = prefill_time
+        time_to_first_token = prefill_time 
         if decode_samples:
-            time_to_first_token += decode_samples[0].execution_time
+            time_to_first_token += refinement_rounds * decode_samples[0].execution_time 
 
         head_dim = getattr(self, "head_dim", None)
         if head_dim is None:
@@ -1094,9 +1105,17 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         prefill_store_bytes = token_bytes * prefill_len * num_layers
         decode_store_bytes = token_bytes * decode_len * num_layers
+        
+        num_blocks = math.ceil(decode_len / block_size) if decode_len > 0 else 0
+        decode_model_calls = num_blocks * refinement_rounds
+        # R KV cache reads per block
         decode_fetch_bytes = token_bytes * num_layers * (
-            decode_len * (prefill_len + self.seq_len) // 2
+            decode_model_calls * (prefill_len + self.seq_len) // 2
         )
+
+  
+
+  
 
         def _to_gib(byte_val: int) -> str:
             gib_val = byte_val / (1024 ** 3)
@@ -1107,7 +1126,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         if decode_samples:
             # do NOT use effective_transformer_batch here
-            decode_rates = self._decode_token_rates(decode_samples, decode_len, decode_time, self.batch_size)
+            decode_rates = self._decode_token_rates(decode_samples, decode_len, decode_time, self.batch_size, block_size, refinement_rounds)
         else:
             decode_rates = None
 
@@ -1136,6 +1155,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             f"[total] energy: {convert_prefix(total_energy)}J, energy/tok: {convert_prefix(total_energy_tok)}J",
         )
 
+        total_model_calls = decode_model_calls + (1 if prefill_len > 0 else 0)
 
         return {
             "prefill_time": prefill_time,
@@ -1146,6 +1166,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "kv_cache_decode_store_bytes": decode_store_bytes,
             "kv_cache_decode_fetch_bytes": decode_fetch_bytes,
             "decode_tokens_per_s": decode_rates,
+            "decode_model_calls": decode_model_calls,
+            "total_model_calls": total_model_calls,
+            "peak_memory_gb": self.memory_peak_gb,
         }
 
     @staticmethod
@@ -1154,6 +1177,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_len: int,
         total_decode_time: float,
         batch_size: int,
+        block_size: int,
+        refinement_rounds: int,
     ) -> Dict[str, float]:
         if decode_len <= 0:
             return {}
@@ -1177,14 +1202,16 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         def safe_rate(token_time: float) -> float:
             if token_time <= 0.0:
                 return 0.0
-            return 1.0 / token_time
-
-        last_step = max(decode_len - 1, 0)
+            return (block_size / refinement_rounds) / token_time
+        
+        num_blocks = math.ceil(decode_len / block_size) if decode_len > 0 else 0
+        last_block = max(num_blocks-1,0)
+        mid_block = num_blocks // 2
         mid_step = decode_len // 2
 
         start_rate = safe_rate(token_time_at(0))
-        mid_rate = safe_rate(token_time_at(mid_step))
-        end_rate = safe_rate(token_time_at(last_step))
+        mid_rate = safe_rate(token_time_at(mid_block))
+        end_rate = safe_rate(token_time_at(last_block))  
 
         overall_rate = 0.0
         if total_decode_time > 0.0:

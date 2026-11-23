@@ -874,7 +874,17 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
     from llm_execution import LLMExecutionDispatcher
     from memory_estimation import MemoryEstimator
 
+    
+    
     tc = TimeCalculationLLMInference(exp_hw_config, exp_model_config, mode, output_dir=output_dir)
+
+    project_param = getattr(tc, "project_param", {}) or {}
+    block_size = int(project_param.get("block_size", 1))
+    refinement_rounds = int(project_param.get("refinement_rounds", 1))
+    if block_size < 1:
+        raise ValueError(f"project_param.block_size must be >= 1, got {block_size}")
+    if refinement_rounds < 1:
+        raise ValueError(f"project_param.refinement_rounds must be >= 1, got {refinement_rounds}")
 
     batch_size = tc._effective_transformer_batch()
     vocab_size = tc.vocab_size
@@ -980,6 +990,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             intermediate_size=tc.moe_intermediate_size if tc.use_moe else intermediate_size,
             vocab_size=vocab_size,
             model_type=tc.model_type,
+            query_tokens=block_size,
         )
         (
             decode_pipeline_graph,
@@ -997,6 +1008,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             batch_size=batch_size,
             total_seq_len=seq_len,
             gemm_shapes=decode_gemm_shapes,
+            query_tokens=block_size,
         )
         decode_dispatcher = LLMExecutionDispatcher(
             time_calc=tc,
@@ -1014,7 +1026,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
         decode_memory_data = mem_estimator.build_memory_data(
             mode="inference",
             batch_size=batch_size,
-            seq_len=1,
+            seq_len=block_size,
             gemm_shapes=decode_gemm_shapes,
             kv_cache_tokens=0 if getattr(tc, "disable_kv_cache", False) else seq_len,
         )
