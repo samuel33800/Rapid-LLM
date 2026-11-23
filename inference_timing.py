@@ -138,7 +138,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         mla_decode = str(getattr(self, "attention_type", "mha")).lower() == "mla" and run_type == "inference"
 
 
-        output_seq_len = 1  # tokens per decode call; query_tokens (H2) is threaded but unused
+        output_seq_len = query_tokens  # tokens per decode call; query_tokens (H2) is threaded but unused
 
         transformer_timings: Dict[str, OperationTiming] = {}
 
@@ -660,7 +660,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             moe_node_breakdown=moe_node_breakdown,
             moe_transformer_timings=moe_transformer_timings,
             batch_size=batch_size,
-            seq_len=1,
+            seq_len=query_tokens,
             hidden_dim=self.hidden_dim,
             intermediate_size=self.intermediate_size,
             vocab_size=self.vocab_size,
@@ -1008,6 +1008,15 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             print("Skipping decode")
             return 0.0, 0.0, []
 
+        project_param = getattr(self, "project_param", {}) or {}
+        block_size = int(project_param.get("block_size", 1))
+        refinement_rounds = int(project_param.get("refinement_rounds", 1))
+        if block_size < 1:
+            raise ValueError(f"project_param.block_size must be >= 1, got {block_size}")
+        if refinement_rounds < 1:
+            raise ValueError(f"project_param.refinement_rounds must be >= 1, got {refinement_rounds}")
+
+
         # Create inference configuration from model parameters
         inference_config = InferenceConfig(
             batch_size=self._effective_transformer_batch(),
@@ -1028,6 +1037,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             tp_sp=self.tp_sp,
             moe_dp=self.moe_dp,
             sample_every=sample_every,
+            block_size=block_size,
+            refinement_rounds=refinement_rounds,
         )
 
 

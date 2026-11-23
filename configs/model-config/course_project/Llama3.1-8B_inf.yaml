@@ -28,3 +28,7 @@ model_param:
     n_shared_experts: 0               # always-on shared experts
     moe_layer_freq: 1                 # every Nth layer is an MoE layer
     first_k_dense_replace: 32         # the first k layers are dense
+
+project_param:
+  block_size: 8         # b: default: 1 = auto-regressive 
+  refinement_rounds: 4  # R: default: 1 = normal auto-regressive 

@@ -1087,10 +1087,8 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
     Returns:
         OrderedDict: GEMM shapes [M, K, N] for decode step operations
     """
-    if query_tokens != 1:
-        raise NotImplementedError(
-            "query_tokens != 1 is Project 3/4: decide which 1s below become query_tokens"
-        )
+    if query_tokens < 1:
+        raise ValueError(f"query_tokens must be >= 1, got {query_tokens}")
     assert num_heads % kv_heads == 0, "num_heads must be divisible by kv_heads"
     head_dim, q_size, kv_size = attention_dim_sizes(
         d_model,
@@ -1109,7 +1107,7 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
     if attention_type == "mla" and run_type == "inference":
         runtime_ops = mla_decode_runtime_op_shapes(
             batch_size=batch_size,
-            query_seq_len=1,
+            query_seq_len=query_tokens,
             hidden_dim=d_model,
             num_heads=num_heads,
             q_lora_rank=self.q_lora_rank,
@@ -1127,33 +1125,33 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
             self.qk_rope_head_dim,
             self.v_head_dim,
         )
-        gemms["qkv_proj"] = (batch_size, 1, d_model, proxy_sizes["qkv_output_size"])
+        gemms["qkv_proj"] = (batch_size, query_tokens, d_model, proxy_sizes["qkv_output_size"])
         gemms["attention_score"] = (
             batch_size * num_heads,
-            1,
+            query_tokens,
             int(self.kv_lora_rank) + int(self.qk_rope_head_dim),
             current_seq_len,
         )
         gemms["attention_output"] = (
             batch_size * num_heads,
-            1,
+            query_tokens,
             current_seq_len,
             proxy_sizes["attention_output_size"],
         )
         gemms["output_proj"] = (
             batch_size,
-            1,
+            query_tokens,
             proxy_sizes["output_proj_input_size"],
             d_model,
         )
     else:
-        # QKV Projection: Only the new token (seq_len = 1)
-        gemms["qkv_proj"] = (batch_size, 1, d_model, q_size + 2 * kv_size)
+        # QKV Projection: new query tokens (seq_len = query_tokens)
+        gemms["qkv_proj"] = (batch_size, query_tokens, d_model, q_size + 2 * kv_size)
 
         # Attention Score: Q(new) @ K(cached+new)
         gemms["attention_score"] = (
             batch_size * kv_heads,
-            1 * shared_heads,
+            query_tokens * shared_heads,
             head_dim,
             current_seq_len,
         )
@@ -1161,16 +1159,16 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
         # Attention Output: attention_weights @ V(cached+new)
         gemms["attention_output"] = (
             batch_size * kv_heads,
-            1 * shared_heads,
+            query_tokens * shared_heads,
             current_seq_len,
             head_dim,
         )
 
     # === POST-ATTENTION LAYERS (same regardless of cache) ===
 
-    # Output projection & FFNs only process the new token
+    # Output projection & FFNs process the new query tokens
     if not (attention_type == "mla" and run_type == "inference"):
-        gemms["output_proj"] = (batch_size, 1, q_size, d_model)
+        gemms["output_proj"] = (batch_size, query_tokens, q_size, d_model)
     projected_dim = (
         2 * intermediate_size
         if uses_gated_mlp(model_type, swiglu_mlp=getattr(self, "swiglu_mlp", False))
@@ -1184,13 +1182,13 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
             else moe_intermediate
         )
         # MoE GEMM shapes use token-owner dimensions; dispatch/combine modeled separately.
-        gemms["ffn1"] = (batch_size, 1, d_model, projected_dim)
-        gemms["ffn2"] = (batch_size, 1, moe_intermediate, d_model)
+        gemms["ffn1"] = (batch_size, query_tokens, d_model, projected_dim)
+        gemms["ffn2"] = (batch_size, query_tokens, moe_intermediate, d_model)
     else:
-        gemms["ffn1"] = (batch_size, 1, d_model, projected_dim) 
-        gemms["ffn2"] = (batch_size, 1, intermediate_size, d_model)
-    gemms["linear"] = (batch_size, 1, d_model, vocab_size)
-    gemms["router"] = (batch_size, 1, d_model, getattr(self, "moe_num_experts", 1))
+        gemms["ffn1"] = (batch_size, query_tokens, d_model, projected_dim)
+        gemms["ffn2"] = (batch_size, query_tokens, intermediate_size, d_model)
+    gemms["linear"] = (batch_size, query_tokens, d_model, vocab_size)
+    gemms["router"] = (batch_size, query_tokens, d_model, getattr(self, "moe_num_experts", 1))
 
     return gemms
 

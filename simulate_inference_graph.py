@@ -46,7 +46,9 @@ class InferenceConfig:
     num_experts: int
     top_k: int
 
-    
+    block_size: int = 1
+    refinement_rounds: int = 1
+
     moe_dp: int = 1  # inference expert pool expansion (used to size MoE routing group)
     pp: int = 1  # layer parallel
     tp: int = 1  # tensor parallel degree
@@ -123,14 +125,21 @@ class DecodeGraph(Graph):
         Returns:
             Tuple of (total_decode_time, list_of_decode_samples)
         """
-        # Determine decode steps we actually simulate
+        # Determine decode steps/blocks we actually simulate
+        block_size = max(1, int(getattr(self.config, "block_size", 1)))  # tokens refined together per call (b)
+        refinement_rounds = max(1, int(getattr(self.config, "refinement_rounds", 1)))  # model calls per block (R)
+        num_blocks = math.ceil(self.config.decode_len / block_size)  # total output blocks across decode_len
+        self.num_decode_blocks = num_blocks
+        self.decode_model_calls = num_blocks * refinement_rounds  # total decode forward passes (blocks * R)
         sample_points = self._generate_sample_points()
 
         # Execute graphs at sample points
         decode_samples = []
-        query_tokens = 1  # Course helper H2: new tokens per decode call (Projects 3 and 4)
+        query_tokens = block_size  # Course helper H2: new tokens per decode call (Projects 3 and 4)
+
         for step_id in sample_points:
-            generated_tokens = step_id + 1
+            # Earlier committed blocks plus the current block of b tokens (clamped to decode_len)
+            generated_tokens = min((step_id + 1) * block_size, self.config.decode_len)
             total_seq_len = self.config.seq_len + generated_tokens
 
             gemm_shapes = llm_util.process_decode_gemm_shapes(
@@ -169,18 +178,22 @@ class DecodeGraph(Graph):
         return total_decode_time, total_decode_energy, decode_samples
 
     def _generate_sample_points(self) -> List[int]:
-        """Generate decode step sample points based on sampling configuration."""
+        """Generate decode step/block sample points based on sampling configuration."""
+        # Sample over block indices [0, num_blocks - 1] instead of individual output tokens
+        block_size = max(1, int(getattr(self.config, "block_size", 1)))
+        num_blocks = math.ceil(self.config.decode_len / block_size)
         sample_points = []
 
-        # Always sample step 0 (first decode step)
+        # Always sample step/block 0 (first decode block)
         sample_points.append(0)
 
         # Sample at regular intervals
-        for step_id in range(self.config.sample_every - 1, self.config.decode_len, self.config.sample_every):
-            sample_points.append(step_id)
+        for step_id in range(self.config.sample_every - 1, num_blocks, self.config.sample_every):
+            if step_id not in sample_points:
+                sample_points.append(step_id)
 
-        # Always sample the last step if configured
-        last_step = self.config.decode_len - 1
+        # Always sample the last block if configured
+        last_step = num_blocks - 1
         if last_step not in sample_points:
             sample_points.append(last_step)
 
@@ -314,8 +327,13 @@ class DecodeGraph(Graph):
                 f"width={step_gap}, midpoint={midpoint:.4f}s, contribution={segment_time:.4f}s"
             )
 
+        # Account for any unsampled trailing blocks beyond the last sampled block
+        block_size = max(1, int(getattr(self.config, "block_size", 1)))
+        refinement_rounds = max(1, int(getattr(self.config, "refinement_rounds", 1)))
+        num_blocks = math.ceil(self.config.decode_len / block_size)
+
         last_sample = samples[-1]
-        remaining_steps = self.config.decode_len - (last_sample.step_id + 1)
+        remaining_steps = num_blocks - (last_sample.step_id + 1)
         if remaining_steps > 0:
             tail_time = remaining_steps * last_sample.execution_time
             total_time += tail_time
@@ -325,9 +343,14 @@ class DecodeGraph(Graph):
                 f"contribution={tail_time:.4f}s"
             )
 
+        # Each block is refined over R identical model calls at the same context length
+        total_time *= refinement_rounds
+        total_energy *= refinement_rounds
+
         print(
             f"[decode] total interpolated decode time: {total_time:.4f}s, energy: {total_energy:.4f}J "
-            f"from {len(samples)} samples"
+            f"from {len(samples)} samples (blocks={num_blocks}, rounds={refinement_rounds}, "
+            f"model_calls={num_blocks * refinement_rounds})"
         )
 
         return total_time, total_energy
