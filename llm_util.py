@@ -980,10 +980,13 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
 
     decode_peak_gb = 0.0
     if decode_len > 0:
+        # Last block is padded to b positions, so the final context is prefill + ceil(decode/b)*b
+        padded_decode_len = math.ceil(decode_len / block_size) * block_size
+        decode_ctx_len = prefill_len + padded_decode_len  # == seq_len when b divides decode_len
         decode_gemm_shapes = process_decode_gemm_shapes(
             tc,
             batch_size=batch_size,
-            current_seq_len=seq_len,
+            current_seq_len=decode_ctx_len,
             d_model=hidden_dim,
             num_heads=num_heads,
             kv_heads=kv_heads,
@@ -1006,7 +1009,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             decode_interconnect_params,
         ), _ = tc.prepare_decode_graphs(
             batch_size=batch_size,
-            total_seq_len=seq_len,
+            total_seq_len=decode_ctx_len,
             gemm_shapes=decode_gemm_shapes,
             query_tokens=block_size,
         )
@@ -1028,7 +1031,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
             batch_size=batch_size,
             seq_len=block_size,
             gemm_shapes=decode_gemm_shapes,
-            kv_cache_tokens=0 if getattr(tc, "disable_kv_cache", False) else seq_len,
+            kv_cache_tokens=0 if getattr(tc, "disable_kv_cache", False) else decode_ctx_len,
         )
         tc.pipeline_graph = decode_pipeline_graph
         _, decode_peak_gb = mem_estimator.simulate_peak(

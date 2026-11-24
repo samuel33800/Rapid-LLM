@@ -168,7 +168,8 @@ def test_block_diffusion_partial_single_block(tmp_path):
     decode_time, _, samples = tc.calc_decode_time()
 
     assert [s.step_id for s in samples] == [0]
-    assert [s.current_seq_len for s in samples] == [516]
+    # Partial block is padded to b=8 positions: context = 512 + 8
+    assert [s.current_seq_len for s in samples] == [520]
     assert math.isclose(decode_time, 4 * samples[0].execution_time, rel_tol=1e-12)
 
 

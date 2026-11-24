@@ -138,8 +138,10 @@ class DecodeGraph(Graph):
         query_tokens = block_size  # Course helper H2: new tokens per decode call (Projects 3 and 4)
 
         for step_id in sample_points:
-            # Earlier committed blocks plus the current block of b tokens (clamped to decode_len)
-            generated_tokens = min((step_id + 1) * block_size, self.config.decode_len)
+            # Earlier committed blocks plus the current block of b positions. A partial last
+            # block is padded to b (masked positions, extra tokens discarded), so its context
+            # matches the b query positions it is priced with.
+            generated_tokens = (step_id + 1) * block_size
             total_seq_len = self.config.seq_len + generated_tokens
 
             gemm_shapes = llm_util.process_decode_gemm_shapes(

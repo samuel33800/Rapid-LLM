@@ -893,10 +893,13 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         decode_peak_gb = prefill_peak_gb
         if decode_len > 0:
+            # Last block is padded to b positions, so the final context is prefill + ceil(decode/b)*b
+            padded_decode_len = math.ceil(decode_len / block_size) * block_size
+            decode_ctx_len = prefill_len + padded_decode_len  # == seq_len when b divides decode_len
             decode_gemm_shapes = llm_util.process_decode_gemm_shapes(
                 self,
                 batch_size=batch_size,
-                current_seq_len=self.seq_len,
+                current_seq_len=decode_ctx_len,
                 d_model=hidden_dim,
                 num_heads=num_heads,
                 kv_heads=kv_heads,
@@ -919,7 +922,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 decode_interconnect_params,
             ), _ = self.prepare_decode_graphs(
                 batch_size=batch_size,
-                total_seq_len=self.seq_len,
+                total_seq_len=decode_ctx_len,
                 gemm_shapes=decode_gemm_shapes,
                 query_tokens=block_size,
             )
@@ -941,7 +944,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 batch_size=batch_size,
                 seq_len=block_size,
                 gemm_shapes=decode_gemm_shapes,
-                kv_cache_tokens=self.seq_len,
+                kv_cache_tokens=decode_ctx_len,
             )
             original_pipeline_graph = self.pipeline_graph
             try:
